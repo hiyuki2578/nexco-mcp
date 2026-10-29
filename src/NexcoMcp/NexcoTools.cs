@@ -12,8 +12,9 @@ public sealed class NexcoTools(NexcoClient client, RouteSearcher searcher)
     [McpServerTool(Name = "search_highway_route", ReadOnly = true, Idempotent = true)]
     [Description("""
         NEXCO の料金・ルート検索で、IC から IC までの高速道路のルートを調べる（全国の高速道路・都市高速に対応）。
-        既定（source=auto）では NEXCO 西日本のサイトで調べ、NEXCO 中日本の区間を通るときは中日本のドライブコンパスで調べ直す
-        （中日本の工事に伴う迂回の料金調整などは中日本のサイトにしか入っていないことがある）。どちらのサイトの結果かは各ルートの site に入る。
+        既定（source=auto）では NEXCO 西日本のサイトで調べ、NEXCO 中日本・東日本の区間を通るときは、長く走る方の会社のサイト
+        （中日本のドライブコンパス・東日本のドラぷら）で調べ直す（会社ごとの工事に伴う料金調整などは、その会社のサイトにしか入っていないことがある）。
+        どのサイトの結果かは各ルートの site に入る。
         ルートごとに通常料金（現金）・ETC 料金・ETC2.0 料金、距離、所要時間（渋滞予測込みの時間も）、出発/到着時刻、通る道路と、
         料金所ごとの料金・適用される ETC 割引（休日・深夜など）、IC・JCT の通過時刻を返す。出張の高速代の見積もりや精算に使える。
 
@@ -37,8 +38,8 @@ public sealed class NexcoTools(NexcoClient client, RouteSearcher searcher)
         [Description("並び順: time=時間順（既定）, distance=距離順, toll=通常料金（現金）が安い順, etc_toll=ETC 料金が安い順")] string sort = "time",
         [Description("返すルートの数 (1〜5)。既定 3")] int count = 3,
         [Description("true なら区間ごとの SA・PA と通過時刻も返す")] bool include_sapa = false,
-        [Description("検索するサイト: auto=NEXCO 中日本の区間を通るときだけドライブコンパス、それ以外は NEXCO 西日本（既定）, west=NEXCO 西日本, central=NEXCO 中日本のドライブコンパス（avoid_roads は使えない）")] string source = "auto",
-        [Description("source=auto で中日本の区間を通るかの判定: any=NEXCO 西日本の候補のどれかが通れば全体をドライブコンパスで調べ直す（既定）, first=1 番目の候補が通れば調べ直す, per_route=通る候補だけドライブコンパスの同じ道路を通るルートに入れ替える")] string auto_rule = "any",
+        [Description("検索するサイト: auto=NEXCO 中日本・東日本の区間を通るときはその会社のサイト、それ以外は NEXCO 西日本（既定）, west=NEXCO 西日本, central=NEXCO 中日本のドライブコンパス, east=NEXCO 東日本のドラぷら（central・east では avoid_roads は使えない。east は count が 3 まで）")] string source = "auto",
+        [Description("source=auto での判定: any=NEXCO 西日本の候補のどれかが中日本・東日本を通れば、そのうち 1 番目の候補で決めたサイトで全体を調べ直す（既定）, first=1 番目の候補で決める, per_route=候補ごとに決め、そのサイトの同じ道路を通るルートに入れ替える")] string auto_rule = "any",
         CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(from)) throw new McpException("from（出発 IC）を指定してください。");

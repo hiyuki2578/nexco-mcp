@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using ModelContextProtocol;
 
 namespace NexcoMcp;
@@ -6,20 +7,21 @@ namespace NexcoMcp;
 /// <summary>どのサイトで検索するか。</summary>
 public enum RouteSource
 {
-    /// <summary>NEXCO 中日本の区間を通るときだけドライブコンパス、それ以外は NEXCO 西日本。</summary>
+    /// <summary>NEXCO 中日本・東日本の区間を通るときはその会社のサイト、それ以外は NEXCO 西日本。</summary>
     Auto,
     West,
     Central,
+    East,
 }
 
-/// <summary>source=auto のとき、何を見て中日本の区間を通ると判定するか。</summary>
+/// <summary>source=auto のとき、NEXCO 西日本のどの候補を見て、検索し直すサイトを決めるか。</summary>
 public enum AutoRule
 {
-    /// <summary>NEXCO 西日本の候補のどれか 1 つでも通れば、全体をドライブコンパスで検索し直す。</summary>
+    /// <summary>中日本・東日本を通る候補のうち 1 番目のもので決め、全体をそのサイトで検索し直す。</summary>
     Any,
-    /// <summary>NEXCO 西日本の 1 番目の候補が通れば、全体をドライブコンパスで検索し直す。</summary>
+    /// <summary>1 番目の候補で決め、全体をそのサイトで検索し直す。</summary>
     First,
-    /// <summary>通る候補だけ、ドライブコンパスの同じ道路を通るルートに入れ替える。</summary>
+    /// <summary>候補ごとに決め、そのサイトの同じ道路を通るルートに入れ替える。</summary>
     PerRoute,
 }
 
@@ -28,17 +30,19 @@ public sealed record SourcedRoute(JsonElement Route, string Site);
 
 public sealed record RouteSearchResult(IReadOnlyList<SourcedRoute> Routes, IReadOnlyList<JsonElement> Roots, IReadOnlyList<string> Notes);
 
-/// <summary>NEXCO 西日本とドライブコンパスを、指定やルートの区間に応じて使い分けて検索する。</summary>
-public sealed class RouteSearcher(NexcoClient west, CentralClient central)
+/// <summary>NEXCO 西日本・中日本（ドライブコンパス）・東日本（ドラぷら）を、指定やルートの区間に応じて使い分けて検索する。</summary>
+public sealed partial class RouteSearcher(NexcoClient west, CentralClient central, EastClient east)
 {
     public const string WestSite = "NEXCO 西日本";
     public const string CentralSite = "NEXCO 中日本（ドライブコンパス）";
+    public const string EastSite = "NEXCO 東日本（ドラぷら）";
 
     public static RouteSource ParseSource(string value) => NexcoTools.ParseOption(value, "source", new Dictionary<string, RouteSource>
     {
         ["auto"] = RouteSource.Auto,
         ["west"] = RouteSource.West,
         ["central"] = RouteSource.Central,
+        ["east"] = RouteSource.East,
     });
 
     public static AutoRule ParseRule(string value) => NexcoTools.ParseOption(value, "auto_rule", new Dictionary<string, AutoRule>
@@ -48,13 +52,21 @@ public sealed class RouteSearcher(NexcoClient west, CentralClient central)
         ["per_route"] = AutoRule.PerRoute,
     });
 
+    private static string SiteName(RouteSource source) => source switch
+    {
+        RouteSource.Central => CentralSite,
+        RouteSource.East => EastSite,
+        _ => WestSite,
+    };
+
     public async Task<RouteSearchResult> SearchAsync(RouteQuery q, RouteSource source, AutoRule rule, CancellationToken ct)
     {
-        if (source == RouteSource.Central)
+        if (source is RouteSource.Central or RouteSource.East)
         {
-            if (q.AvoidRoadCodes.Count > 0) throw new McpException("ドライブコンパス（source=central）では avoid_roads を使えません。source=west にしてください。");
-            var c = await SearchCentralAsync(q, await TranslatorAsync(ct), ct);
-            return new(Routes(c, CentralSite), [c], []);
+            if (q.AvoidRoadCodes.Count > 0)
+                throw new McpException($"{SiteName(source)}（source={source.ToString().ToLowerInvariant()}）では avoid_roads を使えません。source=west にしてください。");
+            var r = await SearchOtherAsync(q, source, await TranslatorAsync(ct), ct);
+            return new(Routes(r, SiteName(source)), [r], []);
         }
 
         var w = await west.SearchRouteAsync(q, ct);
@@ -62,45 +74,57 @@ public sealed class RouteSearcher(NexcoClient west, CentralClient central)
 
         var westRoutes = Json.Array(w, "Detail").ToList();
         var translator = await TranslatorAsync(ct);
-        var touches = westRoutes.Select(r => TouchesCentral(r, translator)).ToList();
-        var needCentral = rule switch
+        var targets = westRoutes.Select(r => Target(r, translator)).ToList();
+        var target = rule switch
         {
-            AutoRule.First => touches.FirstOrDefault(),
-            _ => touches.Any(t => t),
+            AutoRule.First => targets.FirstOrDefault(),
+            _ => targets.FirstOrDefault(t => t != RouteSource.West),
         };
-        if (!needCentral) return new(Routes(w, WestSite), [w], []);
+        if (target == RouteSource.West && !(rule == AutoRule.PerRoute && targets.Any(t => t != RouteSource.West)))
+            return new(Routes(w, WestSite), [w], []);
 
         if (q.AvoidRoadCodes.Count > 0)
-            return new(Routes(w, WestSite), [w], ["NEXCO 中日本の区間を通るが、ドライブコンパスでは通らない道路を指定できないので、NEXCO 西日本の結果を返した。"]);
+            return new(Routes(w, WestSite), [w], [$"NEXCO 中日本・東日本の区間を通るが、{SiteName(target)}では通らない道路を指定できないので、NEXCO 西日本の結果を返した。"]);
 
-        var c2 = await SearchCentralAsync(q, translator, ct);
-        if (rule != AutoRule.PerRoute) return new(Routes(c2, CentralSite), [c2], []);
+        if (rule != AutoRule.PerRoute)
+        {
+            var r = await SearchOtherAsync(q, target, translator, ct);
+            return new(Routes(r, SiteName(target)), [r], []);
+        }
 
-        // 中日本を通る候補だけ、ドライブコンパスの候補のうち同じ有料道路を同じ順に通るものに入れ替える
-        var centralRoutes = Json.Array(c2, "Detail").ToList();
-        var used = new HashSet<int>();
+        // 候補ごとに、そのサイトの候補のうち同じ有料道路を同じ順に通るものに入れ替える（サイトごとに 1 回だけ検索する）
+        var roots = new List<JsonElement> { w };
+        var others = new Dictionary<RouteSource, List<JsonElement>>();
+        foreach (var t in targets.Where(t => t != RouteSource.West).Distinct())
+        {
+            var r = await SearchOtherAsync(q, t, translator, ct);
+            roots.Add(r);
+            others[t] = Json.Array(r, "Detail").ToList();
+        }
+        var used = new HashSet<(RouteSource, int)>();
         var result = new List<SourcedRoute>();
         var notes = new List<string>();
         for (var i = 0; i < westRoutes.Count; i++)
         {
-            if (!touches[i])
+            if (targets[i] == RouteSource.West)
             {
                 result.Add(new(westRoutes[i], WestSite));
                 continue;
             }
             var key = RoadKey(westRoutes[i]);
-            var match = centralRoutes.FindIndex(r => RoadKey(r) == key);
-            if (match >= 0 && used.Add(match))
+            var names = RoadNameKey(westRoutes[i]);
+            var match = others[targets[i]].FindIndex(r => RoadKey(r) == key || RoadNameKey(r) == names);
+            if (match >= 0 && used.Add((targets[i], match)))
             {
-                result.Add(new(centralRoutes[match], CentralSite));
+                result.Add(new(others[targets[i]][match], SiteName(targets[i])));
             }
             else
             {
                 result.Add(new(westRoutes[i], WestSite));
-                notes.Add($"ルート {i + 1} は NEXCO 中日本の区間を通るが、ドライブコンパスに同じ道路を通るルートがなかったので、NEXCO 西日本の結果のまま。");
+                notes.Add($"ルート {i + 1} は {SiteName(targets[i])}で調べ直す区間を通るが、同じ道路を通るルートがなかったので、NEXCO 西日本の結果のまま。");
             }
         }
-        return new(result, [w, c2], notes);
+        return new(result, roots, notes);
     }
 
     private CodeTranslator? _translator;
@@ -119,9 +143,10 @@ public sealed class RouteSearcher(NexcoClient west, CentralClient central)
         return _translator;
     }
 
-    private async Task<JsonElement> SearchCentralAsync(RouteQuery q, CodeTranslator translator, CancellationToken ct)
+    private async Task<JsonElement> SearchOtherAsync(RouteQuery q, RouteSource source, CodeTranslator translator, CancellationToken ct)
     {
         var master = await west.GetMasterAsync(ct);
+        if (source == RouteSource.East) return await east.SearchRouteAsync(q, master, translator.Map, ct);
         string ToCentral(string code) => master.FindByCode(code) is { } ic ? translator.ToCentral(ic) : code;
         var cq = q with
         {
@@ -136,38 +161,66 @@ public sealed class RouteSearcher(NexcoClient west, CentralClient central)
         Json.Array(root, "Detail").Select(r => new SourcedRoute(r, site)).ToList();
 
     /// <summary>
-    /// ルートが NEXCO 中日本の道路を走るか。地点から次の地点までの道路について、
-    /// どちらかの端がその道路上（IC コードの先頭 4 桁が道路コード）の中日本の IC なら、中日本の区間を走るとみなす。
+    /// ルートをどのサイトで調べ直すか。地点から次の地点までの道路ごとに、どちらかの端がその道路上（IC コードの先頭 4 桁が道路コード）の
+    /// IC なら、その IC の管轄の会社の道路とみなして距離を足し、中日本・東日本のうち長く走る方のサイトにする。どちらも走らなければ NEXCO 西日本。
     /// </summary>
-    internal static bool TouchesCentral(JsonElement route, CodeTranslator translator)
+    internal static RouteSource Target(JsonElement route, CodeTranslator translator)
     {
         var points = Points(route);
+        double centralKm = 0, eastKm = 0;
         for (var i = 0; i + 1 < points.Count; i++)
         {
             var road = points[i].Road;
             if (road is null) continue;
-            if (OnRoad(points[i], road) || OnRoad(points[i + 1], road)) return true;
+            var company = Company(points[i], road) ?? Company(points[i + 1], road);
+            if (company == CentralClient.CentralCompany) centralKm += points[i].Km ?? 0.1;
+            else if (company == EastClient.EastCompany) eastKm += points[i].Km ?? 0.1;
         }
-        return false;
+        return centralKm == 0 && eastKm == 0 ? RouteSource.West
+            : centralKm >= eastKm ? RouteSource.Central
+            : RouteSource.East;
 
-        bool OnRoad((string? Code, string? Name, string? Road) p, string road) =>
-            p.Code is { Length: 7 } code && code.StartsWith(road, StringComparison.Ordinal)
-            && translator.CompanyOf(code, p.Name) == CentralClient.CentralCompany;
+        string? Company((string? Code, string? Name, string? Road, double? Km) p, string road) =>
+            p.Code is { Length: 7 } code && code.StartsWith(road, StringComparison.Ordinal) ? translator.CompanyOf(code, p.Name) : null;
     }
 
-    private static List<(string? Code, string? Name, string? Road)> Points(JsonElement route) =>
+    private static List<(string? Code, string? Name, string? Road, double? Km)> Points(JsonElement route) =>
         Json.Obj(route, "Detail") is { } detail
             ? detail.EnumerateObject().Select(p => (
                 Json.Str(Json.Obj(p.Value, "LineIc") ?? default, "Code"),
                 Json.Str(Json.Obj(p.Value, "LineIc") ?? default, "Ic"),
-                Json.Obj(p.Value, "LineRoad") is { } r ? Json.Str(r, "Code") : null)).ToList()
+                Json.Obj(p.Value, "LineRoad") is { } r ? Json.Str(r, "Code") : null,
+                Json.Obj(p.Value, "LineRoad") is { } r2 ? Json.Double(r2, "Dist") : null)).ToList()
             : [];
+
+    // 首都高などは道路コードがサイトによって違うので、道路名でも比べる。
+    // 「E4 東北自動車道」と「E4 東北道」、「首都高速中央環状線」と「首都高中央環状線」のような表記の違いはそろえる
+    private static string RoadNameKey(JsonElement route)
+    {
+        var roads = new List<string>();
+        // 一般道（道路コードが 9 で始まる）は除く
+        var names = Json.Obj(route, "Detail") is { } detail
+            ? detail.EnumerateObject().Select(p => Json.Obj(p.Value, "LineRoad")).OfType<JsonElement>()
+                .Where(r => Json.Str(r, "Code") is not { } c || !c.StartsWith('9'))
+                .Select(r => Json.Str(r, "Road") ?? "")
+            : [];
+        foreach (var name in names)
+        {
+            var n = IcMaster.Normalize(RoadNumberPattern().Replace(name, ""))
+                .Replace("自動車道", "道").Replace("高速道路", "高速").Replace("首都高速", "首都高");
+            if (n.Length > 0 && roads.LastOrDefault() != n) roads.Add(n);
+        }
+        return string.Join(",", roads);
+    }
+
+    [GeneratedRegex(@"^\s*[A-Z]\d+[A-Z]?\s+")]
+    private static partial Regex RoadNumberPattern();
 
     // 一般道（道路コードが 9 で始まる）を除いた、通る道路の並び
     private static string RoadKey(JsonElement route)
     {
         var roads = new List<string>();
-        foreach (var (_, _, road) in Points(route))
+        foreach (var (_, _, road, _) in Points(route))
             if (road is { Length: > 0 } r && !r.StartsWith('9') && roads.LastOrDefault() != r) roads.Add(r);
         return string.Join(",", roads);
     }

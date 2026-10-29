@@ -134,7 +134,7 @@ public sealed class DrivePassTools(NexcoClient client, DrivePassClient passes, R
         [Description("範囲の外から入る（外へ出る）区間の範囲外の分の決め方: route_edge=ルート上の範囲の端の IC から（既定。速旅など）, cheapest_ic=範囲内でいちばん安い IC から（みち旅）")] string outside_rule = "route_edge",
         [Description("車種: kei=軽・自動二輪, normal=普通車（既定）, medium=中型車, large=大型車, extra_large=特大車")] string car_type = "normal",
         [Description("区間ごとのルートの選び方: etc_toll=ETC 料金が安いルート（既定）, time=時間が短いルート, distance=距離が短いルート")] string sort = "etc_toll",
-        [Description("料金を調べるサイト: auto=NEXCO 中日本の区間を通る区間だけドライブコンパス、それ以外は NEXCO 西日本（既定）, west=NEXCO 西日本, central=NEXCO 中日本のドライブコンパス")] string source = "auto",
+        [Description("料金を調べるサイト: auto=NEXCO 中日本・東日本の区間を通る区間はその会社のサイト、それ以外は NEXCO 西日本（既定）, west=NEXCO 西日本, central=NEXCO 中日本のドライブコンパス, east=NEXCO 東日本のドラぷら")] string source = "auto",
         CancellationToken ct = default)
     {
         if (legs is not { Length: > 0 }) throw new McpException("legs（旅程の区間）を 1 つ以上指定してください。");
@@ -371,7 +371,16 @@ public sealed class DrivePassTools(NexcoClient client, DrivePassClient passes, R
             var q = outsideIsStart
                 ? new RouteQuery(outsideCode, edge.Code, [], [], dateTime, false, carType, 9, 1)
                 : new RouteQuery(edge.Code, outsideCode, [], [], dateTime, false, carType, 9, 1);
-            var result = await searcher.SearchAsync(q, source, AutoRule.Any, ct);
+            RouteSearchResult result;
+            try
+            {
+                result = await searcher.SearchAsync(q, source, AutoRule.Any, ct);
+            }
+            catch (McpException) when (source != RouteSource.West)
+            {
+                // 本線料金所のように、ドライブコンパス・ドラぷらでは検索に使えない地点もあるので、NEXCO 西日本で調べ直す
+                result = await searcher.SearchAsync(q, RouteSource.West, AutoRule.Any, ct);
+            }
             return result.Routes.Count > 0 ? Json.Int(Json.Obj(result.Routes[0].Route, "Total") ?? default, "TotalChargeETC") : null;
         }
         catch (McpException)
