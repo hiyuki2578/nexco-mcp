@@ -92,6 +92,8 @@ public sealed class DrivePassTools(NexcoClient client, DrivePassClient passes)
         通常料金は区間ごとに search_highway_route と同じ検索で出す（その日の休日割引・深夜割引も入る）。
         プランを使った場合は、プラン料金に、乗り放題の範囲外を走る分の料金を足す。範囲の外から範囲内へ入る（出る）区間は、
         プランの決まりに合わせて、範囲内でいちばん安くなる IC までの料金を別途かかる分として計算する。
+        このとき、その IC で一度出て乗り直す前提になる。速旅の「発着付き」プランのように、往路は周遊エリア内の IC で出る・
+        復路は周遊エリア内の IC から入る決まりのプランでは、通しで走るとプラン全体が適用されないので、結果の注意を必ず伝える。
 
         area には乗り放題の範囲を道路と端の IC で渡す。範囲は地図でしか示されていないことが多いので、
         先に list_drive_passes でプランの地図画像を見て読み取る。
@@ -136,6 +138,8 @@ public sealed class DrivePassTools(NexcoClient client, DrivePassClient passes)
         var legResults = new List<object>();
         int normalTotal = 0, extraTotal = 0, coveredTotal = 0;
         var dates = new HashSet<DateOnly>();
+        // 範囲の外まで通しで走る区間で、範囲外の分の起点にした範囲の端の IC
+        var reentryIcs = new List<string>();
 
         foreach (var leg in legs)
         {
@@ -198,6 +202,7 @@ public sealed class DrivePassTools(NexcoClient client, DrivePassClient passes)
                         payable = Math.Min(c, etc);
                         detailNote = $"範囲外の分は {(startIn ? $"{via} → {endName}" : $"{startName} → {via}")} の料金で計算";
                         coveredTotal += etc - payable;
+                        if (via is not null) reentryIcs.Add(via);
                     }
                     else
                     {
@@ -233,6 +238,14 @@ public sealed class DrivePassTools(NexcoClient client, DrivePassClient passes)
         var diff = passTotal - normalTotal;
         if (pass_days is { } days && dates.Count > 0 && (dates.Max().DayNumber - dates.Min().DayNumber + 1) > days)
             notes.Add($"旅程が {dates.Max().DayNumber - dates.Min().DayNumber + 1} 日にわたり、プランの利用日数（{days} 日）を超えている。超えた日の走行は通常料金になるので、プランを使う日だけで比べ直すこと。");
+        if (reentryIcs.Count > 0)
+        {
+            // 速旅の「発着付き」プランなどは、往路は周遊エリア内の IC で出る・復路は周遊エリア内の IC から入る 1 回の走行に限られ、
+            // 範囲の外まで通しで走ると往路（復路）として認められず、プラン全体が適用されないことがある
+            notes.Add($"範囲の外まで通しで走る区間がある。プランによっては（速旅の「発着付き」プランなど）、範囲の端の IC で一度出て乗り直さないと、"
+                + $"その走行がプランの往路・復路として認められず、プラン全体が適用されない（すべて通常料金になる）。"
+                + $"この計算は {string.Join("・", reentryIcs.Distinct())} で一度出て乗り直す前提。プランの利用方法の決まりを確かめること。");
+        }
         notes.Add("範囲の判定は area に渡した道路と IC で行った。プランの地図や条件と合っているか確かめること。");
         notes.Add("通常料金と、範囲外の分の料金には、その日の ETC 割引（休日・深夜など）が入っている。プランを使う区間には他の割引は付かず、走った料金がプラン料金に満たなくても差額は返らない。");
         notes.Add("利用できない期間（GW・お盆・3 連休など）や申込回数の上限は、list_drive_passes の詳細で確かめること。");
