@@ -114,6 +114,10 @@ public sealed partial class IcMaster
         // 「E2 山陽自動車道」に対する「山陽道」のように、番号を除いた名前が一致するものを優先する
         var exact = hits.Where(r => NormalizeRoad(RoadNumberPattern().Replace(r.Name, "")) == q || NormalizeRoad(r.Name) == q).ToList();
         if (exact.Count == 1) return exact[0];
+        // 「名神」と「E1 名神高速道路」のように、末尾の「高速」「道」を除いた名前でも比べる（「新名神」とは区別できる）
+        var core = RoadCore(q);
+        var coreHits = hits.Where(r => RoadCore(NormalizeRoad(RoadNumberPattern().Replace(r.Name, ""))) == core).ToList();
+        if (coreHits.Count == 1) return coreHits[0];
         if (hits.Count == 1) return hits[0];
         if (hits.Count == 0)
             throw new McpException($"「{query}」という道路が見つかりません。search_roads で名前を調べてください。");
@@ -152,6 +156,14 @@ public sealed partial class IcMaster
 
     private static string NormalizeRoad(string s) =>
         Normalize(s).Replace("自動車道", "道").Replace("高速道路", "高速");
+
+    private static string RoadCore(string normalized)
+    {
+        var s = normalized;
+        if (s.EndsWith("高速", StringComparison.Ordinal)) s = s[..^2];
+        else if (s.EndsWith('道') && s.Length > 1) s = s[..^1];
+        return s;
+    }
 
     private static string BaseName(string name)
     {

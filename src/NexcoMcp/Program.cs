@@ -28,7 +28,20 @@ builder.Services
         AutomaticDecompression = DecompressionMethods.All,
     });
 
+// 周遊割引プランのサイト（みち旅・速旅・ドラ割）はそれぞれ別のドメインなので、接続先を決めないクライアントにする
+builder.Services
+    .AddHttpClient(DrivePassClient.HttpClientName, http =>
+    {
+        http.Timeout = TimeSpan.FromSeconds(30);
+        http.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", "Mozilla/5.0 (compatible; nexco-mcp)");
+    })
+    .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+    {
+        AutomaticDecompression = DecompressionMethods.All,
+    });
+
 builder.Services.AddSingleton<NexcoClient>();
+builder.Services.AddSingleton<DrivePassClient>();
 
 builder.Services
     .AddMcpServer()

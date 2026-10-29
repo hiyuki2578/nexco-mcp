@@ -260,7 +260,7 @@ public sealed class NexcoTools(NexcoClient client)
     private static string? FormatMinutes(DateTime date, int? minutes) =>
         minutes is { } m ? date.AddMinutes(m).ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) : null;
 
-    private static string CarTypeName(int carType) => carType switch
+    internal static string CarTypeName(int carType) => carType switch
     {
         1 => "軽・自動二輪",
         2 => "普通車",
@@ -269,7 +269,7 @@ public sealed class NexcoTools(NexcoClient client)
         _ => "特大車",
     };
 
-    private static DateTime ParseDateTime(string? date, string? time)
+    internal static DateTime ParseDateTime(string? date, string? time)
     {
         var now = NexcoClient.NowJst();
         var d = DateOnly.FromDateTime(now);
@@ -281,7 +281,7 @@ public sealed class NexcoTools(NexcoClient client)
         return d.ToDateTime(t);
     }
 
-    private static T ParseOption<T>(string value, string name, Dictionary<string, T> options) =>
+    internal static T ParseOption<T>(string value, string name, Dictionary<string, T> options) =>
         options.TryGetValue(value.Trim().ToLowerInvariant(), out var v)
             ? v
             : throw new McpException($"{name} は {string.Join(", ", options.Keys)} のどれかで指定してください（受け取った値: {value}）。");
