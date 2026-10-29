@@ -346,15 +346,24 @@ public sealed class DrivePassTools(NexcoClient client, DrivePassClient passes, R
             return onCrossing.MinBy(ic => Math.Abs(Position(ic.Code, crossingRoad)!.Value - outsidePos));
         }
 
-        // 範囲内の道路から JCT で範囲外の道路に移るときは、手前の道路を進む向きにいちばん先の範囲内の IC が端
+        // 範囲内の道路と範囲外の道路が JCT でつながるときは、範囲内の道路で、ルートが通る側にあって JCT にいちばん近い範囲内の IC が端。
+        // 例: 圏央道から久喜白岡 JCT で東北道（範囲は岩槻〜）に入るなら、JCT より仙台側の久喜（JCT の手前の岩槻はルートが通らない）
         var approachRoad = exiting ? (last > 0 ? seq[last - 1].NextRoad : null) : seq[last].NextRoad;
         if (approachRoad is null || InsideIcs(master, rules, approachRoad) is not { Count: > 0 } onApproach) return null;
         var positions = seq.Take(last + 1).Select(p => Position(p.Code, approachRoad)).OfType<int>().ToList();
         if (positions.Count < 2 || positions[^1] == positions[0]) return null;
-        // 入る区間は逆向きに並べているので、実際の進む向きとは逆になるが、「範囲外に近い側」を選ぶことは同じ
-        return positions[^1] > positions[0]
-            ? onApproach.MaxBy(ic => Position(ic.Code, approachRoad))
-            : onApproach.MinBy(ic => Position(ic.Code, approachRoad));
+        // positions[0] が範囲の奥、positions[^1] が JCT の側（入る区間は逆向きに並べているので、どちらの向きでも同じ）
+        if (Position(seq[last].Code, approachRoad) is null)
+        {
+            // JCT が別の道路のコードで来て位置が分からないときは、JCT の側にいちばん先の範囲内の IC
+            return positions[^1] > positions[0]
+                ? onApproach.MaxBy(ic => Position(ic.Code, approachRoad))
+                : onApproach.MinBy(ic => Position(ic.Code, approachRoad));
+        }
+        var (low, high) = (Math.Min(positions[0], positions[^1]), Math.Max(positions[0], positions[^1]));
+        return onApproach
+            .Where(ic => Position(ic.Code, approachRoad) is { } pos && pos >= low && pos <= high)
+            .MinBy(ic => Math.Abs(Position(ic.Code, approachRoad)!.Value - positions[^1]));
     }
 
     private static List<Ic> InsideIcs(IcMaster master, List<AreaRule> rules, string roadCode) =>
