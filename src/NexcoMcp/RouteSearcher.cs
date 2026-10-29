@@ -158,13 +158,13 @@ public sealed partial class RouteSearcher(NexcoClient west, CentralClient centra
         return new(result, roots, notes);
     }
 
-    // 直線を区切る長さ（km）と、中日本・東日本のサイトを選ぶのに要る、その会社の IC に近い長さ（km）
+    // 直線を区切る長さ（km）と、出発・経由・到着 IC そのものに足す長さ（km）
     private const double SampleKm = 2;
-    private const double MinKm = 10;
+    private const double StopKm = 10;
 
     /// <summary>
     /// 出発・経由・到着 IC を順に結ぶ直線を短く区切り、区切りごとにいちばん近い NEXCO の IC の管轄の会社を数えて、走る会社を見積もる。
-    /// 中日本・東日本のどちらかが MinKm 以上あれば、長い方のサイトにする（Target と同じ決め方）。IC の位置が分からなければ null。
+    /// 西日本・中日本・東日本のうち長い会社のサイトにする（Target と同じ決め方）。IC の位置が分からなければ null。
     /// </summary>
     private async Task<RouteSource?> PredictAsync(RouteQuery q, CodeTranslator translator, CancellationToken ct)
     {
@@ -192,14 +192,18 @@ public sealed partial class RouteSearcher(NexcoClient west, CentralClient centra
             }
         }
         // 出発・経由・到着 IC そのものの会社は確か
-        foreach (var stop in stops) km[stop.Company] = km.GetValueOrDefault(stop.Company) + MinKm;
+        foreach (var stop in stops) km[stop.Company] = km.GetValueOrDefault(stop.Company) + StopKm;
 
-        var centralKm = km.GetValueOrDefault(CentralClient.CentralCompany);
-        var eastKm = km.GetValueOrDefault(EastClient.EastCompany);
-        return centralKm < MinKm && eastKm < MinKm ? RouteSource.West
-            : centralKm >= eastKm ? RouteSource.Central
-            : RouteSource.East;
+        return Longest(km.GetValueOrDefault(WestCompany), km.GetValueOrDefault(CentralClient.CentralCompany), km.GetValueOrDefault(EastClient.EastCompany));
     }
+
+    private const string WestCompany = "103";
+
+    // 長く走る会社のサイト。同じなら西日本、中日本、東日本の順に選ぶ
+    private static RouteSource Longest(double westKm, double centralKm, double eastKm) =>
+        westKm >= centralKm && westKm >= eastKm ? RouteSource.West
+        : centralKm >= eastKm ? RouteSource.Central
+        : RouteSource.East;
 
     // 狭い範囲なので、緯度・経度を平面とみなした距離（km）で足りる
     private static double Distance(double lat1, double lon1, double lat2, double lon2)
@@ -244,12 +248,12 @@ public sealed partial class RouteSearcher(NexcoClient west, CentralClient centra
 
     /// <summary>
     /// ルートをどのサイトで調べ直すか。地点から次の地点までの道路ごとに、どちらかの端がその道路上（IC コードの先頭 4 桁が道路コード）の
-    /// IC なら、その IC の管轄の会社の道路とみなして距離を足し（両端で会社が違えば半分ずつ）、中日本・東日本のうち長く走る方のサイトにする。どちらも走らなければ NEXCO 西日本。
+    /// IC なら、その IC の管轄の会社の道路とみなして距離を足し（両端で会社が違えば半分ずつ）、西日本・中日本・東日本のうち長く走る会社のサイトにする。NEXCO の道路を走らなければ NEXCO 西日本。
     /// </summary>
     internal static RouteSource Target(JsonElement route, CodeTranslator translator)
     {
         var points = Points(route);
-        double centralKm = 0, eastKm = 0;
+        double westKm = 0, centralKm = 0, eastKm = 0;
         for (var i = 0; i + 1 < points.Count; i++)
         {
             var road = points[i].Road;
@@ -259,13 +263,12 @@ public sealed partial class RouteSearcher(NexcoClient west, CentralClient centra
             foreach (var company in companies)
             {
                 var km = (points[i].Km ?? 0.1) / companies.Count;
-                if (company == CentralClient.CentralCompany) centralKm += km;
+                if (company == WestCompany) westKm += km;
+                else if (company == CentralClient.CentralCompany) centralKm += km;
                 else if (company == EastClient.EastCompany) eastKm += km;
             }
         }
-        return centralKm == 0 && eastKm == 0 ? RouteSource.West
-            : centralKm >= eastKm ? RouteSource.Central
-            : RouteSource.East;
+        return Longest(westKm, centralKm, eastKm);
 
         string? Company((string? Code, string? Name, string? Road, double? Km) p, string road) =>
             p.Code is { Length: 7 } code && code.StartsWith(road, StringComparison.Ordinal) ? translator.CompanyOf(code, p.Name) : null;
