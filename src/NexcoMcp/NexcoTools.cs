@@ -7,11 +7,13 @@ using ModelContextProtocol.Server;
 namespace NexcoMcp;
 
 [McpServerToolType]
-public sealed class NexcoTools(NexcoClient client)
+public sealed class NexcoTools(NexcoClient client, RouteSearcher searcher)
 {
     [McpServerTool(Name = "search_highway_route", ReadOnly = true, Idempotent = true)]
     [Description("""
-        NEXCO 西日本の「高速料金・ルート検索」で、IC から IC までの高速道路のルートを調べる（全国の高速道路・都市高速に対応）。
+        NEXCO の料金・ルート検索で、IC から IC までの高速道路のルートを調べる（全国の高速道路・都市高速に対応）。
+        既定（source=auto）では NEXCO 西日本のサイトで調べ、NEXCO 中日本の区間を通るときは中日本のドライブコンパスで調べ直す
+        （中日本の工事に伴う迂回の料金調整などは中日本のサイトにしか入っていないことがある）。どちらのサイトの結果かは各ルートの site に入る。
         ルートごとに通常料金（現金）・ETC 料金・ETC2.0 料金、距離、所要時間（渋滞予測込みの時間も）、出発/到着時刻、通る道路と、
         料金所ごとの料金・適用される ETC 割引（休日・深夜など）、IC・JCT の通過時刻を返す。出張の高速代の見積もりや精算に使える。
 
@@ -35,6 +37,8 @@ public sealed class NexcoTools(NexcoClient client)
         [Description("並び順: time=時間順（既定）, distance=距離順, toll=通常料金（現金）が安い順, etc_toll=ETC 料金が安い順")] string sort = "time",
         [Description("返すルートの数 (1〜5)。既定 3")] int count = 3,
         [Description("true なら区間ごとの SA・PA と通過時刻も返す")] bool include_sapa = false,
+        [Description("検索するサイト: auto=NEXCO 中日本の区間を通るときだけドライブコンパス、それ以外は NEXCO 西日本（既定）, west=NEXCO 西日本, central=NEXCO 中日本のドライブコンパス（avoid_roads は使えない）")] string source = "auto",
+        [Description("source=auto で中日本の区間を通るかの判定: any=NEXCO 西日本の候補のどれかが通れば全体をドライブコンパスで調べ直す（既定）, first=1 番目の候補が通れば調べ直す, per_route=通る候補だけドライブコンパスの同じ道路を通るルートに入れ替える")] string auto_rule = "any",
         CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(from)) throw new McpException("from（出発 IC）を指定してください。");
@@ -44,6 +48,9 @@ public sealed class NexcoTools(NexcoClient client)
         var avoidList = (avoid_roads ?? []).Where(v => !string.IsNullOrWhiteSpace(v)).ToList();
         if (avoidList.Count > 2) throw new McpException("通らない道路は 2 つまでです。");
         if (count is < 1 or > 5) throw new McpException("count は 1〜5 で指定してください。");
+
+        var routeSource = RouteSearcher.ParseSource(source);
+        var rule = RouteSearcher.ParseRule(auto_rule);
 
         var master = await client.GetMasterAsync(ct);
         var fromIc = master.Resolve(from, "出発 IC");
@@ -79,26 +86,29 @@ public sealed class NexcoTools(NexcoClient client)
             }),
             MaxResult: count);
 
-        JsonElement result;
+        RouteSearchResult result;
         try
         {
-            result = await client.SearchRouteAsync(query, ct);
+            result = await searcher.SearchAsync(query, routeSource, rule, ct);
         }
-        catch (McpException ex) when (avoid.Count > 0)
+        catch (McpException ex) when (avoid.Count > 0 && routeSource != RouteSource.Central)
         {
             // 出発・到着 IC のある道路を避けると経路がなくなるので、そのことを添える
             throw new McpException(ex.Message + $"（通らない道路に {string.Join("・", avoid.Select(r => r.Name))} を指定しています。出発・到着・通過 IC がその道路にあると経路が見つかりません）");
         }
 
-        var routes = Json.Array(result, "Detail")
-            .Select((r, i) => ToRoute(i + 1, r, include_sapa))
+        var routes = result.Routes
+            .Select((r, i) => ToRoute(i + 1, r.Route, r.Site, include_sapa))
             .ToList();
+        var sites = result.Routes.Select(r => r.Site).Distinct().ToList();
 
         // 出発・到着 IC の注意書き（出入りできる方向の制限など）と、ルートにかかわるお知らせ
-        var notices = Json.Array(result, "AttentionIC")
-            .Select(a => Json.Str(a, "Message") is { } m ? $"{Json.Str(a, "Name")}: {IcMaster.StripHtml(m)}" : null)
-            .Concat(Json.Array(result, "AttentionList").Select(a => IcMaster.StripHtml(Json.Str(a, "Message") ?? "")))
+        var notices = result.Roots.SelectMany(root => Json.Array(root, "AttentionIC")
+                .Select(a => Json.Str(a, "Message") is { } m ? $"{Json.Str(a, "Name")}: {IcMaster.StripHtml(m)}" : null)
+                .Concat(Json.Array(root, "AttentionList").Select(a => IcMaster.StripHtml(Json.Str(a, "Message") ?? ""))))
+            .Concat(result.Notes)
             .OfType<string>()
+            .Where(n => n.Length > 0)
             .Distinct()
             .ToList();
 
@@ -109,9 +119,10 @@ public sealed class NexcoTools(NexcoClient client)
             Via = viaIcs.Count > 0 ? viaIcs.Select(i => i.Name).ToList() : null,
             AvoidRoads = avoid.Count > 0 ? avoid.Select(r => r.Name).ToList() : null,
             Condition = $"{query.DateTime:yyyy-MM-dd HH:mm} {(query.IsArrival ? "到着" : "出発")}、{CarTypeName(query.CarType)}",
+            Site = string.Join("・", sites),
             Routes = routes,
             Notices = notices.Count > 0 ? notices : null,
-            Note = "料金は NEXCO 西日本のサイトの計算結果。ETC 料金には出発日時に応じた割引（休日・深夜など）が入っている。time は渋滞のない場合の所要時間、time_with_congestion は渋滞予測を入れた所要時間（違うときだけ）。到着時刻と IC の通過時刻は渋滞予測込み。",
+            Note = "料金は site のサイトの計算結果。ETC 料金には出発日時に応じた割引（休日・深夜など）が入っている。time は渋滞のない場合の所要時間、time_with_congestion は渋滞予測を入れた所要時間（違うときだけ）。到着時刻と IC の通過時刻は渋滞予測込み。",
         };
     }
 
@@ -164,7 +175,7 @@ public sealed class NexcoTools(NexcoClient client)
 
     // ---- 応答の組み立て ----
 
-    private static object ToRoute(int no, JsonElement route, bool includeSapa)
+    private static object ToRoute(int no, JsonElement route, string site, bool includeSapa)
     {
         var total = Json.Obj(route, "Total") ?? default;
         var depDate = DateTime.ParseExact(Json.Str(total, "DepDate") ?? "", "yyyyMMdd", CultureInfo.InvariantCulture);
@@ -233,6 +244,7 @@ public sealed class NexcoTools(NexcoClient client)
         return new
         {
             Route = no,
+            Site = site,
             Roads = Json.Array(total, "RoadList").Select(x => x.GetString()).ToList(),
             DistanceKm = Json.Double(total, "DispTotalDist"),
             Time = time,

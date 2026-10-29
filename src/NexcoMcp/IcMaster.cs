@@ -165,7 +165,7 @@ public sealed partial class IcMaster
         return s;
     }
 
-    private static string BaseName(string name)
+    internal static string BaseName(string name)
     {
         var n = name.Normalize(NormalizationForm.FormKC);
         var i = n.IndexOf('(');

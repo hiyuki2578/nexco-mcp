@@ -39,7 +39,7 @@ public sealed class PassArea
 }
 
 [McpServerToolType]
-public sealed class DrivePassTools(NexcoClient client, DrivePassClient passes)
+public sealed class DrivePassTools(NexcoClient client, DrivePassClient passes, RouteSearcher searcher)
 {
     [McpServerTool(Name = "list_drive_passes", ReadOnly = true, Idempotent = true)]
     [Description("""
@@ -134,6 +134,7 @@ public sealed class DrivePassTools(NexcoClient client, DrivePassClient passes)
         [Description("範囲の外から入る（外へ出る）区間の範囲外の分の決め方: route_edge=ルート上の範囲の端の IC から（既定。速旅など）, cheapest_ic=範囲内でいちばん安い IC から（みち旅）")] string outside_rule = "route_edge",
         [Description("車種: kei=軽・自動二輪, normal=普通車（既定）, medium=中型車, large=大型車, extra_large=特大車")] string car_type = "normal",
         [Description("区間ごとのルートの選び方: etc_toll=ETC 料金が安いルート（既定）, time=時間が短いルート, distance=距離が短いルート")] string sort = "etc_toll",
+        [Description("料金を調べるサイト: auto=NEXCO 中日本の区間を通る区間だけドライブコンパス、それ以外は NEXCO 西日本（既定）, west=NEXCO 西日本, central=NEXCO 中日本のドライブコンパス")] string source = "auto",
         CancellationToken ct = default)
     {
         if (legs is not { Length: > 0 }) throw new McpException("legs（旅程の区間）を 1 つ以上指定してください。");
@@ -161,6 +162,8 @@ public sealed class DrivePassTools(NexcoClient client, DrivePassClient passes)
             ["distance"] = 1,
         });
 
+        var routeSource = RouteSearcher.ParseSource(source);
+
         var master = await client.GetMasterAsync(ct);
         var rules = area.Select(a => AreaRule.Resolve(master, a)).ToList();
         bool Inside(string? code) => code is { Length: 7 } && rules.Any(r => r.Contains(code));
@@ -181,9 +184,10 @@ public sealed class DrivePassTools(NexcoClient client, DrivePassClient passes)
             var dateTime = NexcoTools.ParseDateTime(leg.Date, leg.Time ?? "09:00");
             dates.Add(DateOnly.FromDateTime(dateTime));
 
-            var result = await client.SearchRouteAsync(new RouteQuery(
-                fromIc.Code, toIc.Code, viaIcs.Select(i => i.Code).ToList(), [], dateTime, false, carType, priority, 1), ct);
-            var route = Json.Array(result, "Detail").FirstOrDefault();
+            // 1 本だけ調べるので、auto の判定は any でも first でも同じ
+            var searched = await searcher.SearchAsync(new RouteQuery(
+                fromIc.Code, toIc.Code, viaIcs.Select(i => i.Code).ToList(), [], dateTime, false, carType, priority, 1), routeSource, AutoRule.Any, ct);
+            var route = searched.Routes.Count > 0 ? searched.Routes[0].Route : default;
             var total = Json.Obj(route, "Total") ?? default;
             // 地点ごとの IC と、その地点から次の地点までの道路
             var points = Json.Obj(route, "Detail") is { } detail
@@ -230,9 +234,9 @@ public sealed class DrivePassTools(NexcoClient client, DrivePassClient passes)
                     var segment = points.Skip(Math.Max(startIndex, 0)).Take(i - Math.Max(startIndex, 0) + 1).ToList();
                     var edge = routeEdge ? FindRouteEdge(master, rules, segment, exiting: startIn) : null;
                     var (cost, via) = edge is not null
-                        ? (await TollAsync(outsideCode, edge, outsideIsStart: !startIn, dateTime, carType, ct), edge.Name)
+                        ? (await TollAsync(outsideCode, edge, outsideIsStart: !startIn, dateTime, carType, routeSource, ct), edge.Name)
                         : await CheapestToAreaAsync(master, rules, outsideCode, outsideIsStart: !startIn,
-                            segment.Select(p => p.Code).Where(Inside).OfType<string>(), dateTime, carType, ct);
+                            segment.Select(p => p.Code).Where(Inside).OfType<string>(), dateTime, carType, routeSource, ct);
                     if (cost is { } c)
                     {
                         payable = Math.Min(c, etc);
@@ -263,6 +267,7 @@ public sealed class DrivePassTools(NexcoClient client, DrivePassClient passes)
             {
                 Leg = $"{fromIc.Name} → {toIc.Name}",
                 Departure = $"{dateTime:yyyy-MM-dd HH:mm}",
+                Site = searched.Routes.Count > 0 ? searched.Routes[0].Site : null,
                 Roads = Json.Array(total, "RoadList").Select(x => x.GetString()).ToList(),
                 DistanceKm = Json.Double(total, "DispTotalDist"),
                 Time = Json.Str(total, "DispTotalTime"),
@@ -358,7 +363,7 @@ public sealed class DrivePassTools(NexcoClient client, DrivePassClient passes)
     private static int? Position(string? code, string roadCode) =>
         code is { Length: 7 } && code.StartsWith(roadCode, StringComparison.Ordinal) && int.TryParse(code[4..], out var pos) ? pos : null;
 
-    private async Task<int?> TollAsync(string? outsideCode, Ic edge, bool outsideIsStart, DateTime dateTime, int carType, CancellationToken ct)
+    private async Task<int?> TollAsync(string? outsideCode, Ic edge, bool outsideIsStart, DateTime dateTime, int carType, RouteSource source, CancellationToken ct)
     {
         if (outsideCode is null) return null;
         try
@@ -366,8 +371,8 @@ public sealed class DrivePassTools(NexcoClient client, DrivePassClient passes)
             var q = outsideIsStart
                 ? new RouteQuery(outsideCode, edge.Code, [], [], dateTime, false, carType, 9, 1)
                 : new RouteQuery(edge.Code, outsideCode, [], [], dateTime, false, carType, 9, 1);
-            var result = await client.SearchRouteAsync(q, ct);
-            return Json.Int(Json.Obj(Json.Array(result, "Detail").FirstOrDefault(), "Total") ?? default, "TotalChargeETC");
+            var result = await searcher.SearchAsync(q, source, AutoRule.Any, ct);
+            return result.Routes.Count > 0 ? Json.Int(Json.Obj(result.Routes[0].Route, "Total") ?? default, "TotalChargeETC") : null;
         }
         catch (McpException)
         {
@@ -381,7 +386,7 @@ public sealed class DrivePassTools(NexcoClient client, DrivePassClient passes)
     /// </summary>
     private async Task<(int? Cost, string? Via)> CheapestToAreaAsync(
         IcMaster master, List<AreaRule> rules, string? outsideCode, bool outsideIsStart, IEnumerable<string> routeInsideCodes,
-        DateTime dateTime, int carType, CancellationToken ct)
+        DateTime dateTime, int carType, RouteSource source, CancellationToken ct)
     {
         if (outsideCode is null || master.FindByCode(outsideCode) is null) return (null, null);
 
@@ -394,7 +399,7 @@ public sealed class DrivePassTools(NexcoClient client, DrivePassClient passes)
         (int? Cost, string? Via) best = (null, null);
         foreach (var c in candidates)
         {
-            if (await TollAsync(outsideCode, c, outsideIsStart, dateTime, carType, ct) is { } cost && (best.Cost is null || cost < best.Cost))
+            if (await TollAsync(outsideCode, c, outsideIsStart, dateTime, carType, source, ct) is { } cost && (best.Cost is null || cost < best.Cost))
                 best = (cost, c.Name);
         }
         return best;

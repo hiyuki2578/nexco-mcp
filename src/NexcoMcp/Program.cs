@@ -28,6 +28,19 @@ builder.Services
         AutomaticDecompression = DecompressionMethods.All,
     });
 
+// NEXCO 中日本のドライブコンパス
+builder.Services
+    .AddHttpClient(CentralClient.HttpClientName, http =>
+    {
+        http.BaseAddress = new Uri(CentralClient.BaseUrl);
+        http.Timeout = TimeSpan.FromSeconds(30);
+        http.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", "Mozilla/5.0 (compatible; nexco-mcp)");
+    })
+    .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+    {
+        AutomaticDecompression = DecompressionMethods.All,
+    });
+
 // 周遊割引プランのサイト（みち旅・速旅・ドラ割）はそれぞれ別のドメインなので、接続先を決めないクライアントにする
 builder.Services
     .AddHttpClient(DrivePassClient.HttpClientName, http =>
@@ -41,6 +54,8 @@ builder.Services
     });
 
 builder.Services.AddSingleton<NexcoClient>();
+builder.Services.AddSingleton<CentralClient>();
+builder.Services.AddSingleton<RouteSearcher>();
 builder.Services.AddSingleton<DrivePassClient>();
 
 builder.Services
