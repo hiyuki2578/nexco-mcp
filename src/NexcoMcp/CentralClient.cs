@@ -14,7 +14,7 @@ namespace NexcoMcp;
 /// 呼び出し側で <see cref="CodeMap"/> を渡して読み替える。
 /// </summary>
 /// <summary>ドライブコンパスの IC 一覧の 1 件。Company は管轄の会社（101: 東日本, 102: 中日本, 103: 西日本 など）。</summary>
-public sealed record CentralIc(string Code, string Name, string Road, string Company);
+public sealed record CentralIc(string Code, string Name, string Road, string Company, double? Lat, double? Lon);
 
 /// <summary>応答の IC コード・道路コードを NEXCO 西日本のコードに読み替える関数（コード, 名前 → コード）。</summary>
 public sealed record CodeMap(Func<string, string?, string> Ic, Func<string, string?, string> Road);
@@ -41,13 +41,13 @@ public sealed class CentralClient(IHttpClientFactory httpClientFactory, ILogger<
 
             var http = httpClientFactory.CreateClient(HttpClientName);
             using var doc = JsonDocument.Parse(await GetStringAsync(http, "json/icdata.json", ct));
-            // 1 件は [道路コード, IC コード, 名前, 読み, 会社, ...] の形
+            // 1 件は [道路コード, IC コード, 名前, 読み, 会社, 種類, 緯度, 経度, 地域] の形
             var ics = new List<CentralIc>();
             foreach (var ic in Json.Array(doc.RootElement, "icData"))
             {
                 if (ic.GetArrayLength() < 5) continue;
                 if (ic[0].GetString() is { } road && ic[1].GetString() is { } code && ic[2].GetString() is { } name && ic[4].GetString() is { } company)
-                    ics.Add(new CentralIc(code, name, road, company));
+                    ics.Add(new CentralIc(code, name, road, company, Coordinate(ic, 6), Coordinate(ic, 7)));
             }
             if (ics.Count == 0) throw new McpException("ドライブコンパスの IC の一覧を読めませんでした。サイトが改修された可能性があります。");
             logger.LogInformation("ドライブコンパスの IC 一覧を読み込みました（{Count} 件）", ics.Count);
@@ -61,6 +61,9 @@ public sealed class CentralClient(IHttpClientFactory httpClientFactory, ILogger<
             _icsLock.Release();
         }
     }
+
+    private static double? Coordinate(JsonElement ic, int index) =>
+        ic.GetArrayLength() > index && double.TryParse(ic[index].GetString(), NumberStyles.Float, CultureInfo.InvariantCulture, out var v) && v != 0 ? v : null;
 
     /// <summary>
     /// ルート検索。q の IC コードはドライブコンパスのコードで渡す。応答のコードは map で読み替える。

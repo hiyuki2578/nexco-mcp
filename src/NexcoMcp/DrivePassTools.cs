@@ -184,9 +184,8 @@ public sealed class DrivePassTools(NexcoClient client, DrivePassClient passes, R
             var dateTime = NexcoTools.ParseDateTime(leg.Date, leg.Time ?? "09:00");
             dates.Add(DateOnly.FromDateTime(dateTime));
 
-            // 1 本だけ調べるので、auto の判定は any でも first でも同じ
             var searched = await searcher.SearchAsync(new RouteQuery(
-                fromIc.Code, toIc.Code, viaIcs.Select(i => i.Code).ToList(), [], dateTime, false, carType, priority, 1), routeSource, AutoRule.Any, ct);
+                fromIc.Code, toIc.Code, viaIcs.Select(i => i.Code).ToList(), [], dateTime, false, carType, priority, 1), routeSource, AutoRule.Predict, ct);
             var route = searched.Routes.Count > 0 ? searched.Routes[0].Route : default;
             var total = Json.Obj(route, "Total") ?? default;
             // 地点ごとの IC と、その地点から次の地点までの道路
@@ -383,7 +382,7 @@ public sealed class DrivePassTools(NexcoClient client, DrivePassClient passes, R
             RouteSearchResult result;
             try
             {
-                result = await searcher.SearchAsync(q, source, AutoRule.Any, ct);
+                result = await searcher.SearchAsync(q, source, AutoRule.Predict, ct);
             }
             catch (McpException) when (source != RouteSource.West)
             {

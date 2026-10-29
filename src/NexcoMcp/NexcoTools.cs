@@ -39,7 +39,7 @@ public sealed class NexcoTools(NexcoClient client, RouteSearcher searcher)
         [Description("返すルートの数 (1〜5)。既定 3")] int count = 3,
         [Description("true なら区間ごとの SA・PA と通過時刻も返す")] bool include_sapa = false,
         [Description("検索するサイト: auto=NEXCO 中日本・東日本の区間を通るときはその会社のサイト、それ以外は NEXCO 西日本（既定）, west=NEXCO 西日本, central=NEXCO 中日本のドライブコンパス, east=NEXCO 東日本のドラぷら（central・east では avoid_roads は使えない。east は count が 3 まで）")] string source = "auto",
-        [Description("source=auto での判定: any=NEXCO 西日本の候補のどれかが中日本・東日本を通れば、そのうち 1 番目の候補で決めたサイトで全体を調べ直す（既定）, first=1 番目の候補で決める, per_route=候補ごとに決め、そのサイトの同じ道路を通るルートに入れ替える")] string auto_rule = "any",
+        [Description("source=auto での判定: predict=出発・経由・到着 IC を結ぶ直線に沿って管轄の会社を見積もり、最初からそのサイトで検索する（既定。検索は 1 回）。以下は NEXCO 西日本で検索した結果を見て調べ直す（検索は 2 回）: any=候補のどれかが中日本・東日本を通れば、そのうち 1 番目の候補で決めたサイトで全体を調べ直す, first=1 番目の候補で決める, per_route=候補ごとに決め、そのサイトの同じ道路を通るルートに入れ替える")] string auto_rule = "predict",
         CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(from)) throw new McpException("from（出発 IC）を指定してください。");

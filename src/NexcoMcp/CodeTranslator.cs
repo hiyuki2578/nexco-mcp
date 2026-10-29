@@ -43,14 +43,24 @@ public sealed class CodeTranslator
     }
 
     /// <summary>IC の管轄の会社（101: 東日本, 102: 中日本, 103: 西日本 など）。分からなければ null。</summary>
-    public string? CompanyOf(string? code, string? name)
+    public string? CompanyOf(string? code, string? name) => Find(code, name)?.Company;
+
+    /// <summary>NEXCO 西日本の IC コード・名前に当たる、ドライブコンパスの IC。</summary>
+    public CentralIc? Find(string? code, string? name)
     {
         if (code is null) return null;
         var hasSame = _centralByCode.TryGetValue(code, out var same);
-        if (hasSame && (name is null || Key(same!.Name) == Key(name))) return same!.Company;
-        if (name is not null && _centralByName[Key(name)].FirstOrDefault(c => c.Road == Road(code)) is { } onRoad) return onRoad.Company;
-        return hasSame ? same!.Company : null;
+        if (hasSame && (name is null || Key(same!.Name) == Key(name))) return same;
+        if (name is not null && _centralByName[Key(name)].FirstOrDefault(c => c.Road == Road(code)) is { } onRoad) return onRoad;
+        return hasSame ? same : null;
     }
+
+    /// <summary>座標の分かる NEXCO 3 社の IC（会社の見積もりに使う）。</summary>
+    public IReadOnlyList<CentralIc> NexcoIcs => _nexcoIcs ??= _centralByCode.Values
+        .Where(c => c.Lat is not null && c.Lon is not null && c.Company is "101" or "102" or "103")
+        .ToList();
+
+    private List<CentralIc>? _nexcoIcs;
 
     private string ToWest(string code, string? name)
     {
